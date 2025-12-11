@@ -3,7 +3,11 @@ pandas
 numpy
 altair
 joblib
-jason
-train_test_split
-classification_report
-confusion_matrix
+matplotlib
+seaborn
+koreanize-matplotlib
+scikit-learn
+xgboost
+lightgbm
+imbalanced-learn
+optuna
