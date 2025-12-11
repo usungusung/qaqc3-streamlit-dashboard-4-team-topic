@@ -12,7 +12,7 @@ from sklearn.metrics import classification_report, confusion_matrix
 #==========================
 # 0. 페이지 명 설정 및 사이드바 디자인
 #==========================
-st.set_page_config(page_title="그 이름도 무시무시한 밀스펙 2.0", layout='wide')
+st.set_page_config(page_title="밀스펙 2.0", layout='wide')
 
 st.markdown("""
 <style>
@@ -134,9 +134,7 @@ def compute_quality_metrics(mil: pd.DataFrame, k: float = 3.0):
     defect_rate = df["is_defect"].mean()
 
     # 2) sequence별 불량률
-    segment_defect_rate = (
-        df.groupby("sequence_index")["is_defect"].mean()
-    )
+    segment_defect_rate = df.groupby("sequence_index")["is_defect"].mean()
 
     # 3) 시간대별 불량률 (1H)
     df_time = df.set_index("pk_datetime")
@@ -150,32 +148,72 @@ def compute_quality_metrics(mil: pd.DataFrame, k: float = 3.0):
     amp_diff  = df.loc[mask_def, "ampere"].mean()      - df.loc[mask_ok, "ampere"].mean()
     temp_diff = df.loc[mask_def, "temperature"].mean() - df.loc[mask_ok, "temperature"].mean()
 
-    # 5) ISI_volt
+    # 5) ISI_volt : 불량/정상 표준편차 비
     volt_std_def = df.loc[mask_def, "volt"].std()
     volt_std_ok  = df.loc[mask_ok, "volt"].std()
     ISI_volt = np.nan
-    if volt_std_ok not in [0, np.nan]:
+    if not np.isnan(volt_std_ok) and volt_std_ok != 0:
         ISI_volt = volt_std_def / volt_std_ok
 
-    # 6) DRI_current
+    # 6) DRI_current : 불량 시 전류 변화량 절대값 평균
     DRI_current = df.loc[mask_def, "△전류"].abs().mean()
 
-    # 7) MSK_temp
+    # 7) MSK_temp : 불량 시 온도 이동표준편차 평균
     MSK_temp = df.loc[mask_def, "온도이동표준편차"].mean()
 
-    # 8) OOC_volt
-    df["volt_dev"]   = (df["volt"] - df["전압이동평균"]).abs()
-    df["volt_limit"] = k * df["전압이동표준편차"]
-    df["is_ooc_volt"] = df["volt_dev"] > df["volt_limit"]
-    OOC_volt = df["is_ooc_volt"].mean()
+    # ------------------------------------------------------------------
+    # 8) 공통 함수: OOC 비율과 Drift(기울기)를 한 번에 계산
+    # ------------------------------------------------------------------
+    def _calc_ooc_and_drift(
+        data: pd.DataFrame,
+        value_col: str,      # 원시 센서 값 (volt / ampere / temperature)
+        ma_col: str,         # 이동평균 컬럼명
+        std_col: str,        # 이동표준편차 컬럼명
+        time_col: str = "pk_datetime",
+        k: float = 3.0,
+    ):
+        """
+        관리한계 k*σ 기준 OOC 비율과 이동평균에 대한 시간-기울기(drift)를 계산.
+        관련 컬럼이 없거나 데이터가 부족하면 np.nan 반환.
+        """
+        if not all(c in data.columns for c in [value_col, ma_col, std_col, time_col]):
+            return np.nan, np.nan
 
-    # 9) drift_volt
-    drift_volt = np.nan
-    s = df[["pk_datetime", "전압이동평균"]].dropna().sort_values("pk_datetime")
-    if len(s) > 1:
-        x = (s["pk_datetime"] - s["pk_datetime"].min()).dt.total_seconds()
-        y = s["전압이동평균"]
-        drift_volt = np.polyfit(x, y, 1)[0]
+        s = data[[time_col, value_col, ma_col, std_col]].dropna().sort_values(time_col)
+        if len(s) == 0:
+            return np.nan, np.nan
+
+        # OOC 비율
+        dev   = (s[value_col] - s[ma_col]).abs()
+        limit = k * s[std_col]
+        ooc_ratio = (dev > limit).mean()
+
+        # Drift(시간 대비 이동평균의 기울기)
+        drift = np.nan
+        if len(s) > 1:
+            x = (s[time_col] - s[time_col].min()).dt.total_seconds()
+            y = s[ma_col]
+            drift = np.polyfit(x, y, 1)[0]
+
+        return ooc_ratio, drift
+
+    # ------------------------------------------------------------------
+    # 9) 센서별 공정 상태 KPI
+    #    - volt  : 전압이동평균 / 전압이동표준편차
+    #    - ampere: 전류이동평균 / 전류이동표준편차   (컬럼명 다르면 여기만 수정)
+    #    - temp  : 온도이동평균 / 온도이동표준편차   (컬럼명 다르면 여기만 수정)
+    # ------------------------------------------------------------------
+    OOC_volt, drift_volt = _calc_ooc_and_drift(
+        df, "volt", "전압이동평균", "전압이동표준편차", "pk_datetime", k
+    )
+
+    OOC_amp, drift_amp = _calc_ooc_and_drift(
+        df, "ampere", "전류이동평균", "전류이동표준편차", "pk_datetime", k
+    )
+
+    OOC_temp, drift_temp = _calc_ooc_and_drift(
+        df, "temperature", "온도이동평균", "온도이동표준편차", "pk_datetime", k
+    )
 
     summary = {
         "defect_rate": defect_rate,
@@ -187,16 +225,21 @@ def compute_quality_metrics(mil: pd.DataFrame, k: float = 3.0):
         "MSK_temp": MSK_temp,
         "OOC_volt": OOC_volt,
         "drift_volt": drift_volt,
+        "OOC_amp": OOC_amp,
+        "drift_amp": drift_amp,
+        "OOC_temp": OOC_temp,
+        "drift_temp": drift_temp,
     }
 
     return summary, segment_defect_rate, hourly_defect_rate
-
 
 def classification_report_to_df(report_dict):
     """
     sklearn classification_report(output_dict=True)을
     DataFrame 형태로 변환하여 표 형태 시각화에 적합하게 만든다.
     """
+    import pandas as pd
+
     df = pd.DataFrame(report_dict).transpose()
     df = df.round(3)
 
@@ -308,7 +351,7 @@ page = st.sidebar.radio(
         "📊 공정 KPI",
         "📅 Sequence 패턴 한눈에",
         "💻 ML 예측 결과",
-        "불량 원인 분석",
+        "🧯 불량 시퀀스 한눈에",
     )
 )
 
@@ -320,8 +363,7 @@ page = st.sidebar.radio(
 # 4-1. 공정 KPI
 # ===================================
 if page == "📊 공정 KPI":
-    st.markdown("### 1. Featuring 기반 KPI")
-    st.markdown("#### ① 공정 KPI 지표")
+    st.markdown("#### 📊 공정 KPI 지표")
 
     # rec_num 필터
     rec_options = sorted(mil_raw["rec_num"].unique())
@@ -356,18 +398,33 @@ if page == "📊 공정 KPI":
 
     with col_right:
         st.markdown("##### 🏭 공정 상태 KPI")
+
+        # 1) volt KPI
         st.metric(
-            "OOC_volt (정상 영역 일탈 비율)",
+            "OOC_volt (전압 정상 영역 일탈 비율)",
             f"{quality_summary['OOC_volt'] * 100:.1f} %"
         )
-        drift = quality_summary["drift_volt"]
-        st.metric(
-            "drift_volt (전압 DRIFT KPI)",
-            f"{drift:.4f}" if not np.isnan(drift) else "N/A"
-        )
+        
+
+        # 2) ampere KPI
+        if "OOC_amp" in quality_summary:
+            st.metric(
+                "OOC_amp (전류 정상 영역 일탈 비율)",
+                f"{quality_summary['OOC_amp'] * 100:.1f} %"
+            )
+            
+
+        # 3) temperature KPI
+        if "OOC_temp" in quality_summary:
+            st.metric(
+                "OOC_temp (온도 정상 영역 일탈 비율)",
+                f"{quality_summary['OOC_temp'] * 100:.1f} %"
+            )
+
+
 
     st.markdown("---")
-    st.subheader("② 불량률 한눈에")
+    st.markdown("#### 🔥불량 발생 sequence/날짜")
 
     seg_df = seg_defect_rate.reset_index()
     seg_df.columns = ["sequence_index", "defect_rate"]
@@ -433,7 +490,6 @@ elif page == "📅 Sequence 패턴 한눈에":
     )
 
     # 3) 여러 시퀀스 선택
-    st.markdown("#### 시퀀스 선택")
     options = seq_status["option_label"].tolist()
     default_vals = options[:3] if len(options) >= 3 else options
 
@@ -499,13 +555,120 @@ elif page == "📅 Sequence 패턴 한눈에":
 elif page == "💻 ML 예측 결과":
     st.subheader("💻 ML 예측 결과")
 
-    # 공통: Test 확률 예측
+    # 2) 임계값 + KPI / Confusion Matrix
+    
+
+    # ---------------------------------
+    # 0) 공통: Test 확률 예측 (제일 먼저!)
+    # ---------------------------------
     X_test_rf = X_test[feature_names]
     y_proba = rf_model.predict_proba(X_test_rf)[:, 1]
     y_proba_s = pd.Series(y_proba, index=y_test.index)
 
-    # 1) Feature Importance
-    st.markdown("### 1. Feature Importance (RF 기준)")
+    # ---------------------------------
+    # 2) 임계값 + KPI / Confusion Matrix
+    # ---------------------------------
+    
+
+    col_left, col_gap, col_right = st.columns([1, 0.2, 1])
+
+    with col_right:
+        st.markdown("#### 🧮 임계값 & 핵심 성능 지표")
+
+        # threshold slider
+        if "user_th" in st.session_state:
+            default_th = float(st.session_state["user_th"])
+        else:
+            default_th = float(threshold)
+
+        user_th = st.slider(
+            "Threshold (불량으로 예측할 최소 확률)",
+            0.0, 1.0,
+            value=default_th,
+            step=0.01,
+            key="th_slider_ml"
+        )
+        st.session_state["user_th"] = float(user_th)
+
+        # ★ 여기서는 이미 y_proba_s가 위에서 계산되어 있음
+        y_pred_user = (y_proba_s >= user_th).astype(int)
+
+        report_dict = classification_report(
+            y_test, y_pred_user, output_dict=True, zero_division=0
+        )
+        acc = report_dict["accuracy"]
+        f1_defect = report_dict["1"]["f1-score"]
+        recall_defect = report_dict["1"]["recall"]
+
+        # KPI metrics
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Accuracy", f"{acc*100:.1f} %")
+        m2.metric("F1 (불량)", f"{f1_defect:.3f}")
+        m3.metric("Recall (불량)", f"{recall_defect:.3f}")
+
+        st.caption("📄 전체 분류 리포트")
+        report_df = classification_report_to_df(report_dict)
+        st.dataframe(
+            report_df, use_container_width=True, hide_index=False
+        )
+
+    with col_gap:
+        st.subheader("")
+
+    with col_left:
+        st.markdown("#### 🪟 Confusion Matrix")
+
+        cm = confusion_matrix(y_test, y_pred_user)
+        cm_df = pd.DataFrame(
+            cm,
+            index=["Actual 0", "Actual 1"],
+            columns=["Pred 0", "Pred 1"]
+        ).reset_index().rename(columns={"index": "actual"})
+
+        cm_long = cm_df.melt(
+            id_vars="actual",
+            var_name="predicted",
+            value_name="count"
+        )
+
+        heatmap = (
+            alt.Chart(cm_long)
+            .mark_rect()
+            .encode(
+                x=alt.X("predicted:N", title="Predicted"),
+                y=alt.Y("actual:N", title="Actual"),
+                color=alt.Color(
+                    "count:Q",
+                    scale=alt.Scale(scheme="blues"),
+                    legend=alt.Legend(title="Count")
+                ),
+                tooltip=[
+                    alt.Tooltip("actual:N", title="Actual"),
+                    alt.Tooltip("predicted:N", title="Predicted"),
+                    alt.Tooltip("count:Q", title="Count")
+                ],
+            )
+            .properties(height=500)
+        )
+
+        text = (
+            alt.Chart(cm_long)
+            .mark_text(fontSize=14, fontWeight="bold", color="black")
+            .encode(
+                x="predicted:N",
+                y="actual:N",
+                text="count:Q",
+            )
+        )
+
+        st.altair_chart(heatmap + text, use_container_width=True)
+    
+    
+
+    # ---------------------------------
+    #  Feature Importance
+    # ---------------------------------
+    st.markdown("#### 📊 Feature Importance")
 
     importances = rf_model.feature_importances_
     fi = pd.Series(importances, index=feature_names).sort_values(ascending=False)
@@ -535,114 +698,12 @@ elif page == "💻 ML 예측 결과":
 
     st.altair_chart(fi_chart, use_container_width=True)
 
-    # 2) 임계값 + KPI / Confusion Matrix
-    st.markdown("### 2. 임계값 & 성능 지표 / Confusion Matrix")
-
-    col_left,col_gap, col_right = st.columns([1,0.2, 1])
-
-    with col_left:
-        st.caption("#### 임계값 & 핵심 성능 지표")
-
-        # threshold slider
-        if "user_th" in st.session_state:
-            default_th = float(st.session_state["user_th"])
-        else:
-            default_th = float(threshold)
-
-        user_th = st.slider(
-            "Threshold (불량으로 예측할 최소 확률)",
-            0.0, 1.0,
-            value=default_th,
-            step=0.01,
-            key="th_slider_ml"
-        )
-        st.session_state["user_th"] = float(user_th)
-
-        y_pred_user = (y_proba_s >= user_th).astype(int)
-
-        report_dict = classification_report(
-            y_test, y_pred_user, output_dict=True, zero_division=0
-        )
-        acc = report_dict["accuracy"]
-        f1_defect = report_dict["1"]["f1-score"]
-        recall_defect = report_dict["1"]["recall"]
-
-        # KPI metrics
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Accuracy", f"{acc*100:.1f} %")
-        m2.metric("F1 (불량)", f"{f1_defect:.3f}")
-        m3.metric("Recall (불량)", f"{recall_defect:.3f}")
-        
-
-
-
-        st.caption("📄 전체 분류 리포트")
-        report_df = classification_report_to_df(report_dict)
-        st.dataframe(
-            report_df, use_container_width=True, hide_index=False
-        )
-
-    with col_gap:
-        st.subheader("")
-
-
-    with col_right:
-        st.caption("#### Confusion Matrix")
-
-        cm = confusion_matrix(y_test, y_pred_user)
-        cm_df = pd.DataFrame(
-            cm,
-            index=["Actual 0", "Actual 1"],
-            columns=["Pred 0", "Pred 1"]
-        ).reset_index().rename(columns={"index": "actual"})
-
-        cm_long = cm_df.melt(
-            id_vars="actual",
-            var_name="predicted",
-            value_name="count"
-        )
-
-        # --- Heatmap ---
-        heatmap = (
-            alt.Chart(cm_long)
-            .mark_rect()
-            .encode(
-                x=alt.X("predicted:N", title="Predicted"),
-                y=alt.Y("actual:N", title="Actual"),
-                color=alt.Color(
-                    "count:Q",
-                    scale=alt.Scale(scheme="blues"),
-                    legend=alt.Legend(title="Count")
-                ),
-                tooltip=[
-                    alt.Tooltip("actual:N", title="Actual"),
-                    alt.Tooltip("predicted:N", title="Predicted"),
-                    alt.Tooltip("count:Q", title="Count")
-                ],
-            )
-            .properties(height=500)
-        )
-
-        
-        text = (
-            alt.Chart(cm_long)
-            .mark_text(fontSize=14, fontWeight="bold", color="black")
-            .encode(
-                x="predicted:N",
-                y="actual:N",
-                text="count:Q",
-            )
-        )
-
-        st.altair_chart(heatmap + text, use_container_width=True)
-
-
 
 
 
 # ---------- 불량 원인 분석 ----------
-elif page == "불량 원인 분석":
-    st.subheader("🧯 불량 시퀀스 상세 원인 보기")
+elif page == "🧯 불량 시퀀스 한눈에":
+    st.subheader("🧯 불량 시퀀스 한눈에 보기")
 
     # 0) ML 페이지와 연동되는 Threshold 슬라이더
     if "user_th" in st.session_state:
@@ -665,12 +726,38 @@ elif page == "불량 원인 분석":
     y_proba_s = pd.Series(y_proba_test, index=y_test.index)
     y_pred_user = (y_proba_s >= user_th).astype(int)
 
-    # 1) 시퀀스별 불량 확률 + 오진 케이스 (좌/우 배치)
-    st.markdown("### 1. 시퀀스별 불량 확률 / 오진 케이스")
+    # 🔹 NEW 0-1) 전체 데이터 기준 시퀀스별 평균 불량 확률 계산
+    #      (이걸 가지고 '불량으로 예측된 시퀀스 전체' 섹션을 그린다)
+    X_all = mil_ml[feature_names]
+    proba_all = rf_model.predict_proba(X_all)[:, 1]
 
+    mil_all = mil_ml.copy()
+    mil_all["proba_fail"] = proba_all
+
+    seq_prob_all = (
+        mil_all
+        .groupby("sequence_index")
+        .agg(
+            mean_proba=("proba_fail", "mean"),                 # 시퀀스 평균 불량 확률
+            failure_seq=("failure",                           # 시퀀스 실제 라벨(양품/불량)
+                        lambda s: -1.0 if (s == -1.0).any() else 1.0)
+        )
+        .reset_index()
+    )
+
+    # 임계값 기준 시퀀스 단위 예측 라벨
+    seq_prob_all["pred_seq"] = (seq_prob_all["mean_proba"] >= user_th).astype(int)
+
+    # 불량으로 예측된 시퀀스만 추출
+    bad_seq_df = (
+        seq_prob_all[seq_prob_all["pred_seq"] == 1]
+        .sort_values("mean_proba", ascending=False)
+    )
+
+    # 1) 시퀀스별 불량 확률 + 오진 케이스 (좌/우 배치)
     col_left, col_right = st.columns([1, 1])
 
-    # 1-1) 시퀀스별 불량 확률 (LEFT)
+    # 1-1) 시퀀스별 불량 확률 (LEFT) - 기존 코드 유지
     with col_left:
         st.markdown("#### 🔍 시퀀스별 불량 확률")
 
@@ -689,7 +776,7 @@ elif page == "불량 원인 분석":
             c1, c2, c3 = st.columns(3)
             c1.metric("평균 불량 확률", f"{mean_proba:.3f}")
             c2.metric("임계값", f"{user_th:.3f}")
-            c3.metric("예측 결과", "⚠ 불량" if pred_seq == 1 else "✅ 양품")
+            c3.metric("예측 결과", "⚠" if pred_seq == 1 else "✅")
 
             with st.expander("선택 시퀀스 (세그먼트 기반) 상세 보기", expanded=False):
                 seq_view = seq_df.copy()
@@ -698,7 +785,7 @@ elif page == "불량 원인 분석":
         else:
             st.info("해당 시퀀스 데이터 없음")
 
-    # 1-2) 오진 케이스 (RIGHT)
+    # 1-2) 오진 케이스 (RIGHT) - 기존 코드 유지
     with col_right:
         st.markdown("#### ❌ 오진(예측 틀린) 케이스")
 
@@ -715,3 +802,52 @@ elif page == "불량 원인 분석":
                 wrong_cases["예측값(y_pred)"] = y_pred_user.loc[wrong_idx]
                 wrong_cases["불량확률(모델)"] = y_proba_s.loc[wrong_idx]
                 st.dataframe(wrong_cases)
+
+    # ----------------------------------------------------
+    # 2) 불량으로 예측된 시퀀스 전체 보기  (NEW 섹션)
+    # ----------------------------------------------------
+    st.markdown("---")
+    st.markdown("#### 📊 불량으로 예측된 시퀀스 전체 보기")
+
+    n_bad = len(bad_seq_df)
+    st.write(f"현재 임계값 기준으로 불량으로 예측된 시퀀스는 총 **{n_bad}개** 입니다.")
+
+    if n_bad == 0:
+        st.info("이 임계값에서는 불량으로 예측된 시퀀스가 없습니다.")
+    else:
+        # 2-1) 리스트 표로 보여주기
+        show_df = bad_seq_df.copy()
+        show_df["실제라벨"] = np.where(
+            show_df["failure_seq"] == -1.0, "실제 불량", "실제 양품"
+        )
+
+  
+
+        # 2-2) 막대 그래프로 시각화
+        st.markdown("")
+
+        chart_df = show_df.copy()
+        chart_df["sequence_index"] = chart_df["sequence_index"].astype(str)
+        chart_df["실제라벨"] = np.where(
+            chart_df["failure_seq"] == -1.0, "실제 불량", "실제 양품"
+        )
+
+        bad_chart = (
+            alt.Chart(chart_df)
+            .mark_bar()
+            .encode(
+                x=alt.X("sequence_index:N",
+                        sort="-y",
+                        title="Sequence Index"),
+                y=alt.Y("mean_proba:Q", title="평균 불량 예측 확률"),
+                color=alt.Color("실제라벨:N", title="실제 라벨"),
+                tooltip=[
+                    alt.Tooltip("sequence_index:N", title="Sequence"),
+                    alt.Tooltip("mean_proba:Q", title="평균 불량 확률", format=".3f"),
+                    alt.Tooltip("실제라벨:N", title="실제 라벨"),
+                ],
+            )
+            .properties(height=300)
+        )
+
+        st.altair_chart(bad_chart, use_container_width=True)
