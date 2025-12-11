@@ -1,0 +1,9 @@
+streamlit
+pandas
+numpy
+altair
+joblib
+jason
+train_test_split
+classification_report
+confusion_matrix
