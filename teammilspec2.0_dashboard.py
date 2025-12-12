@@ -4,9 +4,15 @@ import numpy as np
 import altair as alt
 import joblib
 import json
-
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
+from sklearn.metrics import classification_report, confusion_matrix
+
+# =========================
+# Color System (Theme)
+# =========================
+DEFECT_RED  = "#E74C3C"
+OK_GRAY     = "#9CA3AF"
+NEUTRAL_GRAY = "#6B7280"  # 그래프/정보용 중립색
 
 
 # =========================================================
@@ -228,7 +234,7 @@ def make_ml_data(raw: pd.DataFrame) -> pd.DataFrame:
     # tertile 부여
     def split_into_tertiles(group: pd.DataFrame) -> pd.DataFrame:
         n = len(group)
-        group = group.sort_values("pk_datetime")  # 시간 기준으로 명확히
+        group = group.sort_values("pk_datetime")
         group["tertile"] = pd.qcut(np.arange(n), 3, labels=[0, 1, 2])
         return group
 
@@ -242,7 +248,6 @@ def make_ml_data(raw: pd.DataFrame) -> pd.DataFrame:
         .reset_index()
     )
 
-    # 모델 학습에 사용했던 feature set
     features_to_use = [
         "volt", "ampere", "temperature",
         "ampere_lag1", "volt_lag1", "temperature_lag1",
@@ -281,12 +286,10 @@ rf_model, rf_meta = load_model_and_meta()
 
 RF_THRESHOLD = float(rf_meta.get("threshold", 0.5))
 
-# feature names (training order)
 feature_names = rf_meta.get("feature_importance", {}).get("features", None)
 if feature_names is None:
     feature_names = [c for c in mil_ml.columns if c != "failure"]
 
-# 학습 데이터 X/y (대시보드 평가/시각화를 위한 split)
 missing_for_X = sorted(set(feature_names) - set(mil_ml.columns))
 if missing_for_X:
     raise KeyError(f"X 만들 때 누락된 컬럼: {missing_for_X}")
@@ -298,12 +301,10 @@ X_train, X_test, y_train, y_test = train_test_split(
     X_all, y_all, test_size=0.2, stratify=y_all, random_state=42
 )
 
-# feature means (for 1-point input completion)
 feature_means = rf_meta.get("feature_means", None)
 if feature_means is None:
     feature_means = X_train.mean(numeric_only=True).to_dict()
 
-# meta에 있는 feature들과 mean 누락 방어
 for col in feature_names:
     if col not in feature_means:
         feature_means[col] = 0.0
@@ -321,17 +322,14 @@ def make_rf_input_row(
     feature_cols: list[str],
     base_means: dict
 ) -> pd.DataFrame:
-    # 기본값: 학습 데이터 평균
     values = {c: float(base_means.get(c, 0.0)) for c in feature_cols}
 
-    # 핵심 입력값 반영
     if "ampere" in values: values["ampere"] = float(ampere)
     if "volt" in values: values["volt"] = float(volt)
     if "temperature" in values: values["temperature"] = float(temperature)
     if "rec_num" in values: values["rec_num"] = int(rec_num)
     if "tertile" in values: values["tertile"] = int(tertile)
 
-    # 단일 포인트에서 lag/rolling/diff는 현실적으로 계산 불가 → “보수적 기본 규칙”
     if "ampere_lag1" in values: values["ampere_lag1"] = float(ampere)
     if "volt_lag1" in values: values["volt_lag1"] = float(volt)
     if "temperature_lag1" in values: values["temperature_lag1"] = float(temperature)
@@ -348,8 +346,7 @@ def make_rf_input_row(
     if "△전압" in values: values["△전압"] = 0.0
     if "△온도" in values: values["△온도"] = 0.0
 
-    X_input = pd.DataFrame([values])[feature_cols]
-    return X_input
+    return pd.DataFrame([values])[feature_cols]
 
 
 # =========================================================
@@ -357,12 +354,10 @@ def make_rf_input_row(
 # =========================================================
 def get_training_ranges(mil_ml_: pd.DataFrame, rec_num: int, tertile: int) -> dict:
     df = mil_ml_.copy()
-
     if "rec_num" in df.columns:
         df = df[df["rec_num"] == rec_num]
     if "tertile" in df.columns:
         df = df[df["tertile"] == tertile]
-
     if len(df) == 0:
         df = mil_ml_.copy()
 
@@ -374,10 +369,6 @@ def get_training_ranges(mil_ml_: pd.DataFrame, rec_num: int, tertile: int) -> di
 
 
 def render_range_caption_under_input(value: float, mn: float, mx: float, unit: str = "") -> bool:
-    """
-    입력 바로 아래에 '학습 범위' 캡션을 표시.
-    범위를 벗어나면 (범위 밖) 표시하고 True 반환.
-    """
     if np.isnan(mn) or np.isnan(mx):
         st.caption("학습 범위: 계산 불가")
         return False
@@ -448,7 +439,7 @@ def page_kpi():
     if not seg_df.empty:
         seg_chart = (
             alt.Chart(seg_df)
-            .mark_bar()
+            .mark_bar(color=DEFECT_RED)
             .encode(
                 x=alt.X("sequence_index:O", title="Sequence"),
                 y=alt.Y("defect_rate:Q", title="불량률"),
@@ -460,17 +451,35 @@ def page_kpi():
     hour_df = hourly_defect_rate.reset_index()
     hour_df.columns = ["pk_datetime", "defect_rate"]
     if not hour_df.empty:
-        hour_chart = (
+
+        line = (
             alt.Chart(hour_df)
-            .mark_line(point=True)
+            .mark_line(color=DEFECT_RED)
             .encode(
                 x=alt.X("pk_datetime:T", title="일시",
                         axis=alt.Axis(format="%m-%d %H:%M", labelAngle=-45)),
                 y=alt.Y("defect_rate:Q", title="불량률"),
+                tooltip=[
+                    alt.Tooltip("pk_datetime:T", title="일시"),
+                    alt.Tooltip("defect_rate:Q", title="불량률", format=".3f"),
+                ],
             )
-            .properties(height=200)
         )
-        st.altair_chart(hour_chart, use_container_width=True)
+
+        points = (
+            alt.Chart(hour_df)
+            .mark_point(color=DEFECT_RED, filled=True, size=40)
+            .encode(
+                x="pk_datetime:T",
+                y="defect_rate:Q",
+                tooltip=[
+                    alt.Tooltip("pk_datetime:T", title="일시"),
+                    alt.Tooltip("defect_rate:Q", title="불량률", format=".3f"),
+                ],
+            )
+        )
+
+        st.altair_chart((line + points).properties(height=200), use_container_width=True)
 
 
 def page_sequence_patterns():
@@ -522,7 +531,11 @@ def page_sequence_patterns():
             .encode(
                 x=alt.X("norm_time:Q", title=""),
                 y=alt.Y(f"{sensor}:Q", title=sensor),
-                color=alt.Color("sequence_index:N", title="Sequence", legend=alt.Legend(orient="right")),
+                color=alt.Color(
+                    "sequence_index:N",
+                    title="Sequence",
+                    scale=alt.Scale(scheme="tableau10")  # ✅ 기본 파랑 단일색 제거
+                ),
                 tooltip=[
                     alt.Tooltip("sequence_index:N", title="Sequence"),
                     alt.Tooltip("norm_time:Q", title="시간(0~1)", format=".2f"),
@@ -540,7 +553,6 @@ def page_sequence_patterns():
 def page_ml_results():
     st.subheader("💻 ML 예측 결과")
 
-    # Test set probability
     y_proba = rf_model.predict_proba(X_test[feature_names])[:, 1]
     y_proba_s = pd.Series(y_proba, index=y_test.index)
 
@@ -584,7 +596,7 @@ def page_ml_results():
             .encode(
                 x=alt.X("predicted:N", title="Predicted"),
                 y=alt.Y("actual:N", title="Actual"),
-                color=alt.Color("count:Q", scale=alt.Scale(scheme="blues"), legend=alt.Legend(title="Count")),
+                color=alt.Color("count:Q", scale=alt.Scale(scheme="reds"), legend=alt.Legend(title="Count")),
                 tooltip=[
                     alt.Tooltip("actual:N", title="Actual"),
                     alt.Tooltip("predicted:N", title="Predicted"),
@@ -608,7 +620,7 @@ def page_ml_results():
     fi_df = pd.DataFrame({"feature": fi.index, "importance": fi.values})
     fi_chart = (
         alt.Chart(fi_df)
-        .mark_bar()
+        .mark_bar(color=NEUTRAL_GRAY)  # ✅ 파란 막대 제거
         .encode(
             x=alt.X("feature:N", sort="-y", axis=alt.Axis(labelAngle=-45, title="Feature")),
             y=alt.Y("importance:Q", title="Importance"),
@@ -629,7 +641,6 @@ def page_fault_sequences():
     user_th = st.slider("Threshold (불량으로 예측할 최소 확률)", 0.0, 1.0, value=th_default, step=0.01, key="th_slider_fault")
     st.session_state["user_th"] = float(user_th)
 
-    # test predictions (for wrong cases)
     y_proba_test = rf_model.predict_proba(X_test[feature_names])[:, 1]
     y_proba_s = pd.Series(y_proba_test, index=y_test.index)
     y_pred_user = (y_proba_s >= user_th).astype(int)
@@ -671,7 +682,7 @@ def page_fault_sequences():
             with st.expander("선택 시퀀스 (세그먼트 기반) 상세 보기", expanded=False):
                 seq_view = seq_df.copy()
                 seq_view["불량확률(모델)"] = proba_seq
-                st.dataframe(seq_view)
+                st.dataframe(seq_view, use_container_width=True)
         else:
             st.info("해당 시퀀스 데이터 없음")
 
@@ -689,7 +700,7 @@ def page_fault_sequences():
                 wrong_cases["실제값(y_true)"] = y_test.loc[wrong_idx]
                 wrong_cases["예측값(y_pred)"] = y_pred_user.loc[wrong_idx]
                 wrong_cases["불량확률(모델)"] = y_proba_s.loc[wrong_idx]
-                st.dataframe(wrong_cases)
+                st.dataframe(wrong_cases, use_container_width=True)
 
     st.markdown("---")
     st.markdown("#### 📊 불량으로 예측된 시퀀스 전체 보기")
@@ -709,7 +720,14 @@ def page_fault_sequences():
         .encode(
             x=alt.X("sequence_index:N", sort="-y", title="Sequence Index"),
             y=alt.Y("mean_proba:Q", title="평균 불량 예측 확률"),
-            color=alt.Color("실제라벨:N", title="실제 라벨"),
+            color=alt.Color(
+                "실제라벨:N",
+                scale=alt.Scale(
+                    domain=["실제 불량", "실제 양품"],
+                    range=[DEFECT_RED, OK_GRAY]
+                ),
+                legend=alt.Legend(title="실제 라벨")
+            ),
             tooltip=[
                 alt.Tooltip("sequence_index:N", title="Sequence"),
                 alt.Tooltip("mean_proba:Q", title="평균 불량 확률", format=".3f"),
@@ -718,6 +736,9 @@ def page_fault_sequences():
         )
         .properties(height=300)
     )
+
+    # ✅ 그래프/테이블 출력 (여기가 빠지면 화면에 안 나옴)
+   
     st.altair_chart(bad_chart, use_container_width=True)
 
 
@@ -747,27 +768,23 @@ def page_point_predict():
         else:
             tertile_input = 2
 
-        # 선택 조건에 맞는 학습 범위(1회 계산)
         ranges = get_training_ranges(mil_ml, rec_num=rec_num_input, tertile=tertile_input)
         (a_min, a_max) = ranges.get("ampere", (np.nan, np.nan))
         (v_min, v_max) = ranges.get("volt", (np.nan, np.nan))
         (t_min, t_max) = ranges.get("temperature", (np.nan, np.nan))
 
-        # 전류 입력 + 전류 범위(바로 아래)
         ampere_input = st.number_input("전류 (ampere)", value=551.5, step=0.1, format="%.2f")
         ood_a = render_range_caption_under_input(ampere_input, a_min, a_max)
 
-        # 전압 입력 + 전압 범위(바로 아래)
         volt_input = st.number_input("전압 (volt)", value=23.2, step=0.1, format="%.2f")
         ood_v = render_range_caption_under_input(volt_input, v_min, v_max)
 
-        # 온도 입력 + 온도 범위(바로 아래)
         temp_input = st.number_input("온도 (℃)", value=12.4, step=0.1, format="%.2f")
         ood_t = render_range_caption_under_input(temp_input, t_min, t_max, unit="℃")
 
         is_ood = bool(ood_a or ood_v or ood_t)
 
-        st.markdown("")  # spacing
+        st.markdown("")
         run_button = st.button("이 조건으로 예측하기", type="primary")
 
     with col_right:
@@ -775,12 +792,10 @@ def page_point_predict():
             st.info("좌측에서 조건을 입력한 후 **[이 조건으로 예측하기]** 버튼을 눌러주세요.")
             return
 
-        # 범위 밖이면 예측 중단 (원하면 경고만 띄우고 계속 진행하도록 바꿀 수 있음)
         if is_ood:
             st.error("입력값이 학습 데이터 범위를 벗어났습니다. (OOD) 예측 신뢰도가 낮아 실행을 중단했습니다.")
             st.stop()
 
-        # 입력 벡터 생성
         X_input = make_rf_input_row(
             ampere=ampere_input,
             volt=volt_input,
@@ -791,8 +806,7 @@ def page_point_predict():
             base_means=feature_means
         )
 
-        # 예측
-        proba_bad = float(rf_model.predict_proba(X_input)[0, 1])  # 불량 확률
+        proba_bad = float(rf_model.predict_proba(X_input)[0, 1])
         pred = int(proba_bad >= RF_THRESHOLD)
         label_text = "불량" if pred == 1 else "정상"
 
@@ -801,10 +815,30 @@ def page_point_predict():
         m1.metric("판정 라벨", label_text)
         m2.metric("불량 확률", f"{proba_bad * 100:.1f} %")
 
-        prob_df = pd.DataFrame(
-            {"label": ["정상", "불량"], "probability": [1 - proba_bad, proba_bad]}
-        ).set_index("label")
-        st.bar_chart(prob_df)
+        # ✅ st.bar_chart(기본 파랑) 대신 Altair로 색 고정
+        prob_plot_df = pd.DataFrame({
+            "label": ["정상", "불량"],
+            "prob": [1 - proba_bad, proba_bad]
+        })
+        prob_chart = (
+            alt.Chart(prob_plot_df)
+            .mark_bar()
+            .encode(
+                x=alt.X("label:N", title=""),
+                y=alt.Y("prob:Q", title="확률", axis=alt.Axis(format="%")),
+                color=alt.Color(
+                    "label:N",
+                    scale=alt.Scale(domain=["정상", "불량"], range=[OK_GRAY, DEFECT_RED]),
+                    legend=None
+                ),
+                tooltip=[
+                    alt.Tooltip("label:N", title="라벨"),
+                    alt.Tooltip("prob:Q", title="확률", format=".3f"),
+                ]
+            )
+            .properties(height=240)
+        )
+        st.altair_chart(prob_chart, use_container_width=True)
 
         st.markdown("---")
         if pred == 1:
