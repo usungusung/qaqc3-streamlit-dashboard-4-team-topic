@@ -630,7 +630,7 @@ def page_ml_results():
             ],
         )
         .properties(height=350)
-    )
+    
     st.altair_chart(fi_chart, use_container_width=True)
 
 
