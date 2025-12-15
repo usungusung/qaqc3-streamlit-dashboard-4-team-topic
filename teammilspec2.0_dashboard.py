@@ -388,9 +388,9 @@ page = st.sidebar.radio(
     (
         "📊 공정 KPI",
         "📅 Sequence 패턴 한눈에",
-        "💻 ML 예측 결과",
+        "💻 ML 예측",
         "🧯 불량 시퀀스 한눈에",
-        "🪄 센서값 기반 합부 판정",
+        "🪄 이상값 알려드림",
     ),
 )
 
@@ -551,7 +551,7 @@ def page_sequence_patterns():
 
 
 def page_ml_results():
-    st.subheader("💻 ML 예측 결과")
+    st.subheader("💻 ML 예측")
 
     y_proba = rf_model.predict_proba(X_test[feature_names])[:, 1]
     y_proba_s = pd.Series(y_proba, index=y_test.index)
@@ -743,7 +743,7 @@ def page_fault_sequences():
 
 
 def page_point_predict():
-    st.subheader("🪄 센서값 기반 합부 판정")
+    st.subheader("🪄 이상값 알려드림")
     st.caption(
         "정류기(rec_num), 공정 구간(tertile), 온도·전류·전압 1포인트를 입력하면 "
         "기존 RandomForest 모델로 이 조건이 양품/불량 분포 중 어디에 가까운지 판정합니다."
