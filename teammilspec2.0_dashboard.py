@@ -620,7 +620,7 @@ def page_ml_results():
     fi_df = pd.DataFrame({"feature": fi.index, "importance": fi.values})
     fi_chart = (
         alt.Chart(fi_df)
-        .mark_bar(color=#C0392B)  
+        .mark_bar(color="#C0392B")  
         .encode(
             x=alt.X("feature:N", sort="-y", axis=alt.Axis(labelAngle=-45, title="Feature")),
             y=alt.Y("importance:Q", title="Importance"),
@@ -629,8 +629,7 @@ def page_ml_results():
                 alt.Tooltip("importance:Q", title="Importance", format=".4f"),
             ],
         )
-        .properties(height=350)
-    
+        .properties(height=350))
     st.altair_chart(fi_chart, use_container_width=True)
 
 
