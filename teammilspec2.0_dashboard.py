@@ -860,9 +860,9 @@ if page == "📊 공정 KPI":
     page_kpi()
 elif page == "📅 Sequence 패턴 한눈에":
     page_sequence_patterns()
-elif page == "💻 ML 예측 결과":
+elif page == "💻 ML 예측":
     page_ml_results()
 elif page == "🧯 불량 시퀀스 한눈에":
     page_fault_sequences()
-elif page == "🪄 센서값 기반 합부 판정":
+elif page == "🪄 이상값 알려드림":
     page_point_predict()
