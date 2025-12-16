@@ -30,7 +30,7 @@ SENSOR_META = {
 # =========================================================
 # 0) Page Config + Sidebar UI CSS
 # =========================================================
-st.set_page_config(page_title="밀스펙 2.0", layout="wide")
+st.set_page_config(page_title="[QAQC 3기] streamlit 대시보드_4팀(방산-양극산화피막 공정의 불량률 예측)", layout="wide")
 
 st.markdown(
     """
