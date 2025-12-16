@@ -20,6 +20,13 @@ SIGMA_BAND_COLORS = {
 ALARM_RULE_COLOR = "#7c3aed"
 N_BINS_FIXED = 50
 
+# ✅ 단 하나의 메타 (절대 재정의 금지)
+SENSOR_META = {
+    "ampere":      {"y_title": "Current (A)",      "unit": "A"},
+    "volt":        {"y_title": "Voltage (V)",      "unit": "V"},
+    "temperature": {"y_title": "Temperature (°C)", "unit": "°C"},
+}
+
 # =========================================================
 # 0) Page Config + Sidebar UI CSS
 # =========================================================
@@ -197,7 +204,39 @@ def compute_sequence_oob_ratio(
     return out
 
 # =========================================================
-# 3) KPI 계산 
+# [추가] 2σ 패턴 차트 축을 단조롭게 만드는 유틸
+# (유틸은 유지하되, SENSOR_META 재정의는 절대 금지)
+# =========================================================
+def minimal_x_axis():
+    return alt.Axis(
+        title=None,
+        tickCount=6,
+        labelColor="#6B7280",
+        domainColor="#9CA3AF",
+        tickColor="#9CA3AF",
+        grid=True,
+        gridColor="#E5E7EB"
+    )
+
+def minimal_y_axis(title: str):
+    return alt.Axis(
+        title=title,
+        labelColor="#6B7280",
+        titleColor="#374151",
+        domainColor="#9CA3AF",
+        tickColor="#9CA3AF",
+        grid=True,
+        gridColor="#E5E7EB"
+    )
+
+def configure_minimal(chart: alt.Chart) -> alt.Chart:
+    return chart.configure_view(stroke=None).configure_axis(
+        labelFontSize=11,
+        titleFontSize=12
+    )
+
+# =========================================================
+# 3) KPI 계산
 # =========================================================
 def compute_quality_metrics(mil: pd.DataFrame, k: float = 3.0):
     df = mil.copy()
@@ -271,7 +310,6 @@ def compute_quality_metrics(mil: pd.DataFrame, k: float = 3.0):
 def make_ml_data(raw: pd.DataFrame) -> pd.DataFrame:
     df = raw.copy()
 
-    # 생성시간
     span = (
         df.groupby("sequence_index")["pk_datetime"]
           .agg(t_min="min", t_max="max")
@@ -280,14 +318,11 @@ def make_ml_data(raw: pd.DataFrame) -> pd.DataFrame:
     span["시간변화량(초)"] = (span["t_max"] - span["t_min"]).dt.total_seconds()
     df = df.merge(span[["sequence_index", "시간변화량(초)"]], on="sequence_index", how="left")
 
-    # 두께 관련
     df["두께변화량"] = df["ampere"] * df["시간변화량(초)"]
     df["최종두께"] = df.groupby("sequence_index")["두께변화량"].transform("sum")
 
-    # time features (row-level)
     df = add_time_features(df)
 
-    # tertile
     def split_into_tertiles(g: pd.DataFrame) -> pd.DataFrame:
         n = len(g)
         g = g.sort_values("pk_datetime")
@@ -297,7 +332,6 @@ def make_ml_data(raw: pd.DataFrame) -> pd.DataFrame:
     df = df.groupby("sequence_index", group_keys=False).apply(split_into_tertiles)
     df["tertile"] = df["tertile"].astype(int)
 
-    # tertile 평균 집계 (segment-level)
     agg = (
         df.groupby(["sequence_index", "tertile"], as_index=False)
           .mean(numeric_only=True)
@@ -351,7 +385,7 @@ for c in feature_names:
     feature_means.setdefault(c, 0.0)
 
 # =========================================================
-# 6) Point Predict Utilities 
+# 6) Point Predict Utilities
 # =========================================================
 def make_rf_input_row(
     ampere: float,
@@ -364,24 +398,20 @@ def make_rf_input_row(
 ) -> pd.DataFrame:
     values = {c: float(base_means.get(c, 0.0)) for c in feature_cols}
 
-    # raw
     if "ampere" in values: values["ampere"] = float(ampere)
     if "volt" in values: values["volt"] = float(volt)
     if "temperature" in values: values["temperature"] = float(temperature)
     if "rec_num" in values: values["rec_num"] = int(rec_num)
     if "tertile" in values: values["tertile"] = int(tertile)
 
-    # lag -> 입력값으로 대체
     if "ampere_lag1" in values: values["ampere_lag1"] = float(ampere)
     if "volt_lag1" in values: values["volt_lag1"] = float(volt)
     if "temperature_lag1" in values: values["temperature_lag1"] = float(temperature)
 
-    # rolling mean -> 입력값 근사
     if "전류이동평균" in values: values["전류이동평균"] = float(ampere)
     if "전압이동평균" in values: values["전압이동평균"] = float(volt)
     if "온도이동평균" in values: values["온도이동평균"] = float(temperature)
 
-    # rolling std/diff -> 0 근사
     for c in ["전류이동표준편차", "전압이동표준편차", "온도이동표준편차", "△전류", "△전압", "△온도"]:
         if c in values: values[c] = 0.0
 
@@ -413,7 +443,6 @@ def render_range_caption_under_input(value: float, mn: float, mx: float, unit: s
     return out
 
 def get_ok_sigma_stats(mil_ml_: pd.DataFrame, rec_num: int, tertile: int) -> dict:
-    """정상 데이터만으로 rec_num/tertile별 평균/표준편차 계산"""
     df = mil_ml_.copy()
     if "rec_num" in df.columns:
         df = df[df["rec_num"] == rec_num]
@@ -421,7 +450,6 @@ def get_ok_sigma_stats(mil_ml_: pd.DataFrame, rec_num: int, tertile: int) -> dic
         df = df[df["tertile"] == tertile]
     df = df[df["failure"] != -1.0] if "failure" in df.columns else df
 
-    # fallback: 전체 정상
     if len(df) == 0:
         df = mil_ml_.copy()
         df = df[df["failure"] != -1.0] if "failure" in df.columns else df
@@ -438,7 +466,6 @@ def get_ok_sigma_stats(mil_ml_: pd.DataFrame, rec_num: int, tertile: int) -> dic
     return stats
 
 def sigma_zone(value: float, mu: float, sigma: float) -> tuple[float, int]:
-    """|z| 기준 zone: 0(≤1σ) 1(1~2σ) 2(2~3σ) 3(>3σ) 99(불가)"""
     if np.isnan(mu) or np.isnan(sigma) or sigma == 0:
         return np.nan, 99
     z = abs((value - mu) / sigma)
@@ -448,7 +475,6 @@ def sigma_zone(value: float, mu: float, sigma: float) -> tuple[float, int]:
     return z, 3
 
 def sigma_band_chart(value: float, mu: float, sigma: float, title: str):
-    """1σ/2σ/3σ 밴드 + 평균선 + 입력값 포인트"""
     if np.isnan(mu) or np.isnan(sigma) or sigma == 0:
         st.warning(f"{title}: σ 계산 불가(데이터 부족 또는 분산 0)")
         return
@@ -561,55 +587,156 @@ def page_kpi():
         )
         st.altair_chart((line + points).properties(height=200), use_container_width=True)
 
-
 def page_sequence_patterns():
     st.subheader("📅 시퀀스 패턴 + 2σ 기준 이탈 비율")
-    st.info("각 Sequence의 공정 패턴을 확인할 수 있습니다. \n\n"
-            "공정 전반에서 정상 범위를 벗어난 비율을 통해 이상 비율이 높은 sequence를 식별합니다. ")
+    st.info(
+        "각 Sequence의 공정 패턴을 확인할 수 있습니다.\n\n"
+        "공정 전반에서 정상 범위를 벗어난 비율을 통해 이상 비율이 높은 sequence를 식별합니다."
+    )
 
-    tab1, tab2 = st.tabs(["시퀀스 패턴 ", "2σ 기준 이탈 비율"])
+    tab1, tab2 = st.tabs(["시퀀스 패턴", "2σ 기준 이탈 비율"])
 
+    # =============================
+    # TAB 1: 시퀀스 패턴 + 2σ band
+    # =============================
     with tab1:
         rec_options = sorted(mil_raw["rec_num"].dropna().unique())
-        rec_selected = st.selectbox("rec_num 선택", rec_options)
+        rec_selected = st.selectbox("rec_num 선택", rec_options, key="rec_select_tab1")
 
-        mil = mil_raw[mil_raw["rec_num"] == rec_selected].copy()
-        mil = add_time_features(mil)
+        mil = mil_raw.loc[mil_raw["rec_num"] == rec_selected].copy()
+        if mil.empty:
+            st.warning("해당 rec_num 데이터가 없습니다.")
+            st.stop()
 
         seq_status = sequence_failure_label(mil)
         seq_status["status_icon"] = np.where(seq_status["failure_label"] == "불량", "⚠", "✅")
-        seq_status["option_label"] = seq_status.apply(lambda r: f"{int(r.sequence_index)} - {r.status_icon}", axis=1)
+        seq_status["option_label"] = seq_status.apply(
+            lambda r: f"{int(r.sequence_index)} - {r.status_icon}", axis=1
+        )
         label_to_seq = dict(zip(seq_status["option_label"], seq_status["sequence_index"]))
 
         options = seq_status["option_label"].tolist()
         default_vals = options[:3] if len(options) >= 3 else options
-        selected_labels = st.multiselect("Sequence 선택 (✅양품, ⚠불량)", options=options, default=default_vals)
+
+        selected_labels = st.multiselect(
+            "Sequence 선택 (✅양품, ⚠불량)",
+            options=options,
+            default=default_vals,
+            key="seq_multi_tab1",
+        )
         if not selected_labels:
             st.info("최소 1개 이상의 시퀀스를 선택하세요.")
             st.stop()
 
         selected_seqs = [label_to_seq[l] for l in selected_labels]
-        mil_sel = mil[mil["sequence_index"].isin(selected_seqs)].copy()
+
+        mil_sel = mil.loc[mil["sequence_index"].isin(selected_seqs)].copy()
         mil_sel = add_norm_time(mil_sel)
 
-        st.caption("※ x축은 각 시퀀스의 시작-끝을 0-1로 정규화한 상대 시간입니다.")
-
         charts = []
-        for sensor in ["ampere", "volt", "temperature"]:
-            band_df = compute_sigma_band(mil, sensor=sensor, n_bins=N_BINS_FIXED, sigma_k=2.0, rec_num=rec_selected)
-            band = alt.Chart(band_df).mark_area(opacity=0.5, color=SIGMA_BAND_COLORS[1]).encode(
-                x="t_mean:Q", y="lower:Q", y2="upper:Q"
-            )
-            line = alt.Chart(mil_sel).mark_line().encode(
-                x="norm_time:Q",
-                y=f"{sensor}:Q",
-                color=alt.Color("sequence_index:N", legend=alt.Legend(title="Sequence"),
-                                scale=alt.Scale(scheme="tableau10"))
-            )
-            charts.append((band + line).properties(height=120, title=sensor))
+        sensors = ["ampere", "volt", "temperature"]
 
-        st.altair_chart(alt.vconcat(*charts).resolve_scale(y="independent"), use_container_width=True)
+        for idx, sensor in enumerate(sensors):
+            meta = SENSOR_META.get(sensor, {"y_title": sensor, "unit": ""})
+            y_title = meta["y_title"]  # ✅ Current (A) / Voltage (V) / Temperature (°C)
+            unit = meta["unit"]
 
+            band_df = compute_sigma_band(
+                df_raw=mil,
+                sensor=sensor,
+                n_bins=N_BINS_FIXED,
+                sigma_k=2.0,
+                rec_num=rec_selected
+            ).copy()
+
+            if band_df.empty:
+                st.warning(f"{sensor}: 정상 데이터 부족으로 2σ band를 만들 수 없습니다.")
+                continue
+
+            # ✅ 축은 base에서 한 번만 잡고, Y축 title은 y_title로 고정
+            base = alt.Chart().encode(
+                x=alt.X(
+                    "norm_time:Q",
+                    title=None,
+                    axis=alt.Axis(
+                        tickCount=6,
+                        grid=True,
+                        labelColor="#6B7280",
+                        tickColor="#9CA3AF",
+                        domainColor="#9CA3AF",
+                        labels=(idx == len(sensors) - 1),
+                    ),
+                ),
+                y=alt.Y(
+                    f"{sensor}:Q",
+                    title=y_title,  # ✅ 여기!
+                    axis=alt.Axis(
+                        title=y_title,  # ✅ 여기!
+                        grid=True,
+                        labelColor="#6B7280",
+                        tickColor="#9CA3AF",
+                        domainColor="#9CA3AF",
+                        titleColor="#374151",
+                    ),
+                ),
+            )
+
+            band_df = band_df.rename(columns={"t_mean": "norm_time"})
+
+            # ✅ line 먼저 (축 기준 유지)
+            line_layer = base.mark_line().encode(
+                y=alt.Y(f"{sensor}:Q"),
+                color=alt.Color(
+                    "sequence_index:N",
+                    legend=alt.Legend(title="Sequence"),
+                    scale=alt.Scale(scheme="tableau10"),
+                ),
+                tooltip=[
+                    alt.Tooltip("sequence_index:N", title="Sequence"),
+                    alt.Tooltip("norm_time:Q", title="t(norm)", format=".3f"),
+                    alt.Tooltip(f"{sensor}:Q", title=y_title, format=".2f"),
+                ],
+            ).properties(data=mil_sel)
+
+            # ✅ band가 y(lower)로 축을 덮어쓰지 않게 title/axis를 동일하게 명시
+            band_layer = base.mark_area(
+                opacity=0.35,
+                color=SIGMA_BAND_COLORS[1]
+            ).encode(
+                y=alt.Y(
+                    "lower:Q",
+                    title=y_title,  # ✅ 여기!
+                    axis=alt.Axis(
+                        title=y_title,  # ✅ 여기!
+                        grid=True,
+                        labelColor="#6B7280",
+                        tickColor="#9CA3AF",
+                        domainColor="#9CA3AF",
+                        titleColor="#374151",
+                    ),
+                ),
+                y2=alt.Y2("upper:Q"),
+                tooltip=[
+                    alt.Tooltip("norm_time:Q", title="t(norm)", format=".3f"),
+                    alt.Tooltip("lower:Q", title="2σ lower", format=".2f"),
+                    alt.Tooltip("upper:Q", title="2σ upper", format=".2f"),
+                ],
+            ).properties(data=band_df)
+
+            layer = alt.layer(line_layer, band_layer).properties(height=180)
+            charts.append(layer)
+
+        if not charts:
+            st.warning("표시할 차트가 없습니다(정상 band 생성 실패 또는 데이터 없음).")
+            st.stop()
+
+        v = alt.vconcat(*charts).resolve_axis(y="independent")
+        v = v.configure_view(stroke=None).configure_axis(labelFontSize=11, titleFontSize=12)
+        st.altair_chart(v, use_container_width=True)
+
+    # =============================
+    # TAB 2: 2σ 기준 이탈 비율
+    # =============================
     with tab2:
         st.caption("전체 정상(전 rec_num 통합) 기준 band를 만들고, 시퀀스별 이탈 비율(%)을 계산합니다.")
 
@@ -638,9 +765,11 @@ def page_sequence_patterns():
         bars = alt.Chart(plot_df).mark_bar().encode(
             x=alt.X("sequence_index:O", title="sequence_index"),
             y=alt.Y("abs_oob_ratio:Q", title="2σ 영역 이탈 비율(%)", scale=alt.Scale(domain=[0, 100])),
-            color=alt.Color("failure_label:N",
-                            scale=alt.Scale(domain=["정상", "불량"], range=[OK_COLOR, FAIL_COLOR]),
-                            legend=alt.Legend(title="failure")),
+            color=alt.Color(
+                "failure_label:N",
+                scale=alt.Scale(domain=["정상", "불량"], range=[OK_COLOR, FAIL_COLOR]),
+                legend=alt.Legend(title="failure"),
+            ),
             tooltip=[
                 alt.Tooltip("sequence_index:O", title="sequence_index"),
                 alt.Tooltip("failure_label:N", title="failure"),
@@ -658,30 +787,27 @@ def page_sequence_patterns():
         st.altair_chart((bars + rule).properties(height=380), use_container_width=True)
 
         if alarm_cnt > 0:
-            # 경고 시퀀스 중 이탈비율 상위 10개
             top_alarm = (
                 plot_df[plot_df["is_alarm"]]
                 .sort_values("abs_oob_ratio", ascending=False)
                 .head(10)
             )
-
-            seq_list_str = ", ".join(
-                top_alarm["sequence_index"].astype(str).tolist()
-            )
+            seq_list_str = ", ".join(top_alarm["sequence_index"].astype(str).tolist())
 
             st.warning(
                 f"⚠ 경고 시퀀스가 있습니다.\n\n"
                 f"- 이탈 비율 상위 시퀀스: **{seq_list_str}**\n\n"
-
             )
         else:
             st.success("현재 기준선에서는 경고 시퀀스가 없습니다.")
 
-
 def page_ml_results():
     st.subheader("💻 ML 예측 결과")
-    st.info("Sequence 패턴을 기반으로 학습한 rf 모델의 성능을 확인할 수 있습니다. \n\n" \
-    "Feature Importance 지표를 통해 공정 개선의 우선순위를 결정에 활용할 수 있습니다. ")
+    st.info(
+        "Sequence 패턴을 기반으로 학습한 rf 모델의 성능을 확인할 수 있습니다. \n\n"
+        "Feature Importance 지표를 통해 공정 개선의 우선순위를 결정에 활용할 수 있습니다. "
+    )
+
     y_proba = rf_model.predict_proba(X_test[feature_names])[:, 1]
     y_proba_s = pd.Series(y_proba, index=y_test.index)
 
@@ -742,22 +868,21 @@ def page_ml_results():
 
     st.altair_chart(fi_chart, use_container_width=True)
 
-
 def page_fault_sequences():
     st.subheader("🧯 불량 시퀀스 한눈에 보기")
-    st.info("모델이 불량으로 판단한 sequence를 한눈에 확인할 수 있습니다. \n\n"
-            "실제 불량과 오진 사례를 구분하여 추가 점검이 필요한 sequence 선별에 활용할 수 있습니다.")
+    st.info(
+        "모델이 불량으로 판단한 sequence를 한눈에 확인할 수 있습니다. \n\n"
+        "실제 불량과 오진 사례를 구분하여 추가 점검이 필요한 sequence 선별에 활용할 수 있습니다."
+    )
 
     th_default = float(st.session_state.get("user_th", RF_THRESHOLD))
     user_th = st.slider("Threshold (불량으로 예측할 최소 확률)", 0.0, 1.0, value=th_default, step=0.01, key="th_slider_fault")
     st.session_state["user_th"] = float(user_th)
 
-    # test 예측 (오진용)
     y_proba_test = rf_model.predict_proba(X_test[feature_names])[:, 1]
     y_proba_s = pd.Series(y_proba_test, index=y_test.index)
     y_pred_user = (y_proba_s >= user_th).astype(int)
 
-    # 전체 예측 (sequence 평균 확률)
     proba_all = rf_model.predict_proba(X_all[feature_names])[:, 1]
     mil_all = mil_ml.copy()
     mil_all["proba_fail"] = proba_all
@@ -842,12 +967,12 @@ def page_fault_sequences():
 
     st.altair_chart(bad_chart, use_container_width=True)
 
-
 def page_point_predict():
     st.subheader("🪄 센서값 기반 합부 판정")
-    st.info("개별 공정 조건을 기준으로 합/부 판정을 판단할 수 있습니다. \n\n" \
-    "입력값이 정상 분포 내 어니 위치에 해당하는지 시각적으로 확인하여 위험도를 직관적으로 판단할 수 있습니다.")
-
+    st.info(
+        "개별 공정 조건을 기준으로 합/부 판정을 판단할 수 있습니다. \n\n"
+        "입력값이 정상 분포 내 어니 위치에 해당하는지 시각적으로 확인하여 위험도를 직관적으로 판단할 수 있습니다."
+    )
 
     col_left, col_right = st.columns([2, 3])
 
@@ -915,18 +1040,18 @@ def page_point_predict():
         st.markdown("---")
         st.markdown("#### 정상 기준 σ 위치(1σ/2σ/3σ)")
 
-        sigma_band_chart(ampere_input, a_mu, a_sig, "전류 (ampere)")
-        sigma_band_chart(volt_input,   v_mu, v_sig, "전압 (volt)")
-        sigma_band_chart(temp_input,   t_mu, t_sig, "온도 (temperature)")
+        sigma_band_chart(ampere_input, a_mu, a_sig, "Current (A)")
+        sigma_band_chart(volt_input,   v_mu, v_sig, "Voltage (V)")
+        sigma_band_chart(temp_input,   t_mu, t_sig, "Temperature (°C)")
 
         z_a, zone_a = sigma_zone(ampere_input, a_mu, a_sig)
         z_v, zone_v = sigma_zone(volt_input,   v_mu, v_sig)
         z_t, zone_t = sigma_zone(temp_input,   t_mu, t_sig)
 
         over_items = []
-        if zone_a in [2, 3]: over_items.append("전류(ampere)")
-        if zone_v in [2, 3]: over_items.append("전압(volt)")
-        if zone_t in [2, 3]: over_items.append("온도(temperature)")
+        if zone_a in [2, 3]: over_items.append("Current (A)")
+        if zone_v in [2, 3]: over_items.append("Voltage (V)")
+        if zone_t in [2, 3]: over_items.append("Temperature (°C)")
 
         if over_items:
             st.warning(
@@ -936,8 +1061,6 @@ def page_point_predict():
             )
         else:
             st.success("정상 분포 기준 **±2σ** 범위 내입니다. (알람 영역 아님)")
-
-
 
 # =========================================================
 # 8) Sidebar Navigation + Router
